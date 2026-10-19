@@ -1,33 +1,6 @@
 import socket
-#from . import CONFIG
 import pickle
-
-CONFIG = {
-    "IP_address": "127.0.0.1",
-    "port": 49_153,
-    "client_buffer": 1024,
-    "server_buffer": 1024
-}
-
-def flatten(uv:list[tuple[int]]) -> list[int]:
-    '''Input format: [(u0, v0), (u1, v1), ...]'''
-    res = []
-    for pair in uv:
-        res.append(pair[0])
-        res.append(pair[1])
-    return res
-
-def unflatten(uv:list[int]) -> list[tuple[int]]:
-    '''Input format: [u0, v0, u1, v1, u2, v2, ...]'''
-    res = []
-    previous = None
-    for item in uv:
-        if previous is None:
-            previous = item
-        else:
-            res.append((previous, item))
-            previous = None
-    return res
+from depth_server.depth_server import CONFIG, flatten, warn
 
 def get_depth_values_sync(uv:list[int], timestamp:int, ip_addr:str, port:int, client_buffer:int, server_buffer:int) -> list[int] | str:
     '''Input format (uv): [u0, v0, u1, v1, u2, v2, ...]'''
@@ -59,9 +32,9 @@ def get_depth_values_sync(uv:list[int], timestamp:int, ip_addr:str, port:int, cl
         try:
             client.close()
         except UnboundLocalError:
-            print("[WARN] No connection to close.")
+            warn("No connection to close")
 
-def get_depth_values_sync_wrapper(uv:list[tuple[int]], timestamp:int, config:dict=CONFIG) -> list[int]:
+def get_depth_values_sync_wrapper(uv:list[tuple[int]], timestamp:int, config:dict=CONFIG) -> list[int] | str:
     '''Input format: [(u0, v0), (u1, v1), ...]'''
     uv_flattened = flatten(uv)
     return get_depth_values_sync(
@@ -72,20 +45,20 @@ def get_depth_values_sync_wrapper(uv:list[tuple[int]], timestamp:int, config:dic
         client_buffer = config["client_buffer"],
         server_buffer = config["server_buffer"]
     )
-     
 
 if __name__ == "__main__":
     import time
     # https://learn.microsoft.com/en-us/windows/win32/direct3d9/images/uvcoordinates.jpg
     test_data = [
-        [(10, 10)]*100,
-        [(10, 10)]*300,
-        [],
-        [(150, 150), (100, 100), (60, 60), (10, 10), (639, 479)],
-        [(480, 640)] # must raise error
+        ([(10, 10)]*100, 111),
+        ([(10, 10)]*100, 222), # no frame found
+        ([(10, 10)]*300, 111),
+        ([], 111),
+        ([(150, 150), (100, 100), (60, 60), (10, 10), (639, 479)], 111),
+        ([(640, 480)], 111), # must raise error
     ]
     while True:
-        time.sleep(1)
+        time.sleep(4)
         for pairs in test_data:
-            print(f"Sending {pairs} ...")
-            print("Received: ",get_depth_values_sync_wrapper(uv=pairs, timestamp=111))
+            print(f"Sending {pairs[0]} ...")
+            print("Received: ",get_depth_values_sync_wrapper(uv=pairs[0], timestamp=pairs[1]))

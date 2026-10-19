@@ -2,6 +2,7 @@
 # https://wiki.python.org/moin/TcpCommunication.html
 # ΤΙ ΊΝΕΤΑΙ ΜΕ ΤΟ LATENCY? ΥΠΆΡΧΕΙ ΜΕΓΆΛΗ ΧΡΟΝΙΚΉ ΔΙΑΦΟΡΆ ΣΤΑ FRAMES
 # ΠΡΈΠΕΙ ΝΑ ΣΤΈΛΝΕΤΑΙ ΚΑΙ TIMESTAMP
+# Connect with receiver from topics broadcaster and keep only the last frame ????
 
 # https://docs.python.org/3/builtins/threadsafety.html#thread-safety-for-dict-objects
 
@@ -11,44 +12,9 @@ from sensor_msgs.msg import Image
 from rclpy.executors import ExternalShutdownException
 import socket
 import pickle
-import numpy as np
 import time
 import threading
-# from . import CONFIG
-
-red_back = lambda x:f"\033[1;101m{x}\033[0;0m"
-green_back = lambda x:f"\033[1;102m{x}\033[0;0m"
-blue_back = lambda x:f"\033[1;104m{x}\033[0;0m"
-
-red_fore = lambda x:f"\033[1;91m{x}\033[0;0m"
-green_fore = lambda x:f"\033[1;92m{x}\033[0;0m"
-blue_fore = lambda x:f"\033[1;94m{x}\033[0;0m"
-
-CONFIG = {
-    "IP_address": "127.0.0.1",
-    "port": 49_153,
-    "client_buffer": 1024,
-    "server_buffer": 1024,
-    "max_connections": 1,
-    "increment": 16,
-    "topic_name": "/b2/camera_front_435i/realsense_front_435i/aligned_depth_to_color/image_raw",
-    "decode_image": lambda depth: (np.frombuffer(depth.data, dtype=np.uint16).reshape((depth.height, depth.width)), depth.header.stamp.sec),
-    "history": 20,
-    "interval": 0.2, # 1 / FPS
-    "slop": 1, # sec
-}
-
-def unflatten(uv:list[int]) -> list[tuple[int]]:
-    '''Input format: [u0, v0, u1, v1, u2, v2, ...]'''
-    res = []
-    previous = None
-    for item in uv:
-        if previous is None:
-            previous = item
-        else:
-            res.append((previous, item))
-            previous = None
-    return res
+from . import CONFIG, unflatten, red_fore, green_fore, blue_fore, info, warn, error
 
 class Server_Node(Node):
     
@@ -71,15 +37,6 @@ class Server_Node(Node):
         network_thread = threading.Thread(target=self.start_server)
         network_thread.start()
     
-    def info(self, msg:str):
-        print("[INFO] "+msg)
-    
-    def warn(self, msg:str):
-        print("[WARN] "+msg)
-    
-    def error(self, msg:str):
-        print("[ERROR] "+msg)
-
     def push(self, data):
         with self.history_lock:
             self.history.append(data)
@@ -101,50 +58,56 @@ class Server_Node(Node):
         decoded_image = self.config["decode_image"](image)
         self.push(decoded_image)
     
-    def connection_callback(self, uv_and_timestamp:list[int]):
+    def connection_callback(self, uv_and_timestamp:list[int], msg_counter:int):
         '''Input format: [u0, v0, u1, v1, u2, v2, ..., un, vn, timestamp]'''
         uv = uv_and_timestamp[:-1]
         timestamp = uv_and_timestamp[-1]
         depth_frame = self.retrieve(timestamp)
         if depth_frame is not None:
             # u = pair[0] (horizontal), v = pair[1] (vertical)
-            depths = [depth_frame[pair[1]][pair[0]].item() for pair in unflatten(uv)]
+            try:
+                depths = [depth_frame[pair[1]][pair[0]].item() for pair in unflatten(uv)]
+            except IndexError as e:
+                error(f"[{msg_counter}] Index out of range ({str(e)})")
+                depths = []
             return depths
         else:
+            warn(f"[{msg_counter}] No frame found")
             return []
     
     def start_server(self) -> None:
-        self.info(f"Starting server ...")
+        info("Starting server ...")
         self.server.bind((self.config["IP_address"], self.config["port"]))
         self.server.listen(self.config["max_connections"])
-        self.info(f"Listening @ {self.config['IP_address']}:{self.config['port']} [max conn.: {self.config['max_connections']}] [buffer: {self.config['server_buffer']}]")
+        info(f"Listening @ {blue_fore(self.config['IP_address'])}:{blue_fore(self.config['port'])} [max conn.: {self.config['max_connections']}] [buffer: {self.config['server_buffer']}]")
         msg_counter = 0
         while True:
             try:
                 msg_counter += 1
                 connection, client_address = self.server.accept()
+                info(f"[{msg_counter}] New connection: {blue_fore(client_address[0])}:{blue_fore(client_address[1])}")
                 binary_in = connection.recv(self.config["server_buffer"])
                 in_data = pickle.loads(binary_in)
-                out_data = self.connection_callback(in_data)
+                out_data = self.connection_callback(in_data, msg_counter)
                 binary_out = pickle.dumps(out_data)
                 if len(binary_out) >= self.config["client_buffer"]:
-                    self.warn(f"[{msg_counter}] {client_address[0]}:{client_address[1]} res:{binary_sent}B >= buffer:{self.config['client_buffer']}B {red_fore('\u2612')}\a")    
+                    warn(f"[{msg_counter}] res:{binary_sent}B >= buffer:{self.config['client_buffer']}B {red_fore('\u2612')}\a")    
                     connection.send(b"")
                     break
                 binary_sent = connection.send(binary_out)
-                self.info(f"[{msg_counter}] {client_address[0]}:{client_address[1]} req:{len(binary_in)}B --> res:{binary_sent}B {green_fore('\u2611')}")
+                info(f"[{msg_counter}] req:{len(binary_in)}B --> res:{binary_sent}B {green_fore('\u2611')}")
             except KeyboardInterrupt:
-                self.error(f"[{msg_counter}] Shutdown signal received by keyboard \a{red_fore('\u2620')}")
+                error(f"[{msg_counter}] Shutdown signal received by keyboard")
                 raise ExternalShutdownException("Exit.")
             except pickle.PickleError as e:
-                self.error(f"[{msg_counter}] Corrupted packet: \'{str(e)}\'")
+                error(f"[{msg_counter}] Corrupted packet: \'{str(e)}\'")
             except BaseException as e:
-                self.error(f"[{msg_counter}] {str(e)}")
+                error(f"[{msg_counter}] {str(e)}")
             finally:
                 try:
                     connection.close()
                 except UnboundLocalError:
-                    self.warn(f"[{msg_counter}] No connection to close.")
+                    warn(f"[{msg_counter}] No connection to close.")
 
 def main():
     try:
